@@ -3,321 +3,257 @@
 #include <ArduinoJson.h>
 #include "painlessMesh.h"
 
-// =====================================================
-// MESH CONFIGURATION - IDENTICAL ON ALL NODES
-// =====================================================
+// ==========================================
+// MESH CONFIGURATION
+// ==========================================
 
-#define MESH_PREFIX       "ESP32_MESH"
-#define MESH_PASSWORD     "mesh_password_123"
-#define MESH_PORT         5555
-#define MESH_CHANNEL      6
+#define MESH_PREFIX     "ESP32_MESH"
+#define MESH_PASSWORD   "mesh_password_123"
+#define MESH_PORT       5555
+#define MESH_CHANNEL    6
 
-#define TELEMETRY_INTERVAL 5000
-#define HOST_TIMEOUT       10000
+#define HOST_TIMEOUT          10000
+#define GATEWAY_ANNOUNCE_MS    3000
+#define GATEWAY_TIMEOUT       10000
 
-// =====================================================
+// ==========================================
 // GLOBAL OBJECTS
-// =====================================================
+// ==========================================
 
 Scheduler userScheduler;
 painlessMesh mesh;
 
-uint32_t messageCounter = 0;
-
-uint32_t lastTelemetry = 0;
+uint32_t lastBroadcast = 0;
+uint32_t lastStatus = 0;
+uint32_t lastGatewayAnnounce = 0;
 uint32_t lastHostSeen = 0;
+uint32_t lastServerTelemetry = 0;
+
+const uint32_t BROADCAST_INTERVAL = 5000;
+const uint32_t STATUS_INTERVAL = 15000;
+const uint32_t SERVER_TELEMETRY_INTERVAL = 10000;
 
 bool hostConnected = false;
+bool previousHostState = false;
 
-// USB input buffer
+uint32_t gatewayNodeId = 0;
+uint32_t lastGatewaySeen = 0;
+bool gatewayAvailable = false;
+
 char serialBuffer[512];
 size_t serialBufferIndex = 0;
 
-// =====================================================
-// JSON OUTPUT TO PYTHON
-// =====================================================
+// ==========================================
+// SERIAL JSON OUTPUT
+// ==========================================
 
 void sendSerialJson(JsonDocument &doc) {
     serializeJson(doc, Serial);
     Serial.println();
 }
 
-void sendSerialEvent(const char* eventName) {
-    JsonDocument doc;
+// ==========================================
+// NETWORK DIAGNOSTICS
+// ==========================================
 
-    doc["event"] = eventName;
-    doc["nodeId"] = mesh.getNodeId();
+void printNetworkStatus() {
+    auto nodes = mesh.getNodeList();
 
-    sendSerialJson(doc);
+    Serial.println();
+    Serial.println("========== MESH STATUS ==========");
+
+    Serial.printf("Own Node ID: %u\n", mesh.getNodeId());
+    Serial.printf("Connected nodes: %d\n", (int)nodes.size());
+
+    for (uint32_t nodeId : nodes) {
+        Serial.printf("  Node ID: %u\n", nodeId);
+    }
+
+    Serial.println("Network topology:");
+    Serial.println(mesh.subConnectionJson());
+
+    Serial.printf("Gateway available: %s\n",
+                  gatewayAvailable ? "YES" : "NO");
+
+    if (gatewayAvailable) {
+        Serial.printf("Gateway Node ID: %u\n", gatewayNodeId);
+    }
+
+    Serial.println("=================================");
 }
 
-// =====================================================
-// CREATE MESH PACKET
-// =====================================================
+// ==========================================
+// GATEWAY ANNOUNCEMENT
+// ==========================================
 
-String createPacket(
-    const char* type,
-    uint32_t destination,
-    const String& payload
-) {
+void announceGateway(bool active) {
     JsonDocument doc;
 
-    doc["v"] = 1;
-    doc["type"] = type;
-    doc["id"] = ++messageCounter;
+    doc["type"] = "gateway_announce";
+    doc["nodeId"] = mesh.getNodeId();
+    doc["active"] = active;
+
+    String packet;
+    serializeJson(doc, packet);
+
+    mesh.sendBroadcast(packet);
+
+    Serial.printf("[GATEWAY] Announcement: %s\n",
+                  active ? "ACTIVE" : "INACTIVE");
+}
+
+// ==========================================
+// SEND DATA TO PYTHON SERVER
+// ==========================================
+
+bool sendToServer(const String &payload) {
+
+    JsonDocument doc;
+
+    doc["type"] = "server_data";
     doc["from"] = mesh.getNodeId();
-    doc["to"] = destination;
     doc["payload"] = payload;
 
     String packet;
     serializeJson(doc, packet);
 
-    return packet;
-}
+    // This node is the USB gateway.
+    if (hostConnected) {
+        JsonDocument output;
 
-// =====================================================
-// SEND APPLICATION ACKNOWLEDGEMENT
-// =====================================================
+        output["event"] = "server_data";
+        output["from"] = mesh.getNodeId();
+        output["payload"] = payload;
 
-void sendAcknowledgement(
-    uint32_t destination,
-    uint32_t originalMessageId
-) {
-    JsonDocument doc;
+        sendSerialJson(output);
 
-    doc["v"] = 1;
-    doc["type"] = "ack";
-    doc["id"] = ++messageCounter;
-    doc["from"] = mesh.getNodeId();
-    doc["to"] = destination;
-    doc["replyTo"] = originalMessageId;
-    doc["payload"] = "received";
-
-    String packet;
-    serializeJson(doc, packet);
-
-    bool success = mesh.sendSingle(destination, packet);
-
-    Serial.printf(
-        "[ACK] To %u: %s\n",
-        destination,
-        success ? "queued" : "failed"
-    );
-}
-
-// =====================================================
-// NETWORK STATUS
-// =====================================================
-
-void printNetworkStatus() {
-    auto nodes = mesh.getNodeList();
-
-    JsonDocument doc;
-
-    doc["event"] = "nodes";
-    doc["nodeId"] = mesh.getNodeId();
-    doc["count"] = nodes.size();
-
-    JsonArray array = doc["nodes"].to<JsonArray>();
-
-    for (uint32_t nodeId : nodes) {
-        array.add(nodeId);
+        return true;
     }
 
-    doc["topology"] = mesh.subConnectionJson();
+    // No known gateway.
+    if (!gatewayAvailable) {
+        Serial.println("[SERVER] No gateway available");
+        return false;
+    }
 
-    Serial.println("[MESH STATUS]");
-    sendSerialJson(doc);
+    // Route through PainlessMesh to the gateway.
+    bool success = mesh.sendSingle(gatewayNodeId, packet);
+
+    Serial.printf("[SERVER] Routed to gateway %u: %s\n",
+                  gatewayNodeId,
+                  success ? "QUEUED" : "FAILED");
+
+    return success;
 }
 
-// =====================================================
-// MESH RECEIVE CALLBACK
-// =====================================================
+// ==========================================
+// MESSAGE CALLBACK
+// ==========================================
 
 void receivedCallback(uint32_t from, String &msg) {
 
-    Serial.printf(
-        "[MESH RX] From %u: %s\n",
-        from,
-        msg.c_str()
-    );
+    JsonDocument doc;
 
-    JsonDocument packet;
-
-    DeserializationError error = deserializeJson(packet, msg);
+    DeserializationError error = deserializeJson(doc, msg);
 
     if (error) {
-        Serial.println("[ERROR] Invalid mesh JSON");
+        Serial.printf("[RECEIVED] From %u: %s\n",
+                      from, msg.c_str());
         return;
     }
 
-    const char* type = packet["type"] | "";
-    uint32_t destination = packet["to"] | 0UL;
-    uint32_t messageId = packet["id"] | 0UL;
+    const char* type = doc["type"] | "";
 
-    // Forward received mesh packet to Python
-    // if this node has an active USB host.
+    // Gateway discovery.
+    if (strcmp(type, "gateway_announce") == 0) {
 
-    if (hostConnected) {
-        JsonDocument output;
+        uint32_t announcedNode = doc["nodeId"] | 0UL;
+        bool active = doc["active"] | false;
 
-        output["event"] = "mesh_rx";
-        output["transportFrom"] = from;
-        output["message"] = msg;
+        if (active) {
+            gatewayNodeId = announcedNode;
+            gatewayAvailable = true;
+            lastGatewaySeen = millis();
 
-        sendSerialJson(output);
-    }
+            Serial.printf("[GATEWAY DISCOVERED] Node: %u\n",
+                          gatewayNodeId);
+        }
+        else if (announcedNode == gatewayNodeId) {
+            gatewayAvailable = false;
+            gatewayNodeId = 0;
 
-    // Handle directed messages
-    if (
-        strcmp(type, "message") == 0 &&
-        destination == mesh.getNodeId()
-    ) {
-        Serial.printf(
-            "[MESSAGE] Intended for this node. ID: %u\n",
-            messageId
-        );
-
-        // Send application-level reply
-        sendAcknowledgement(from, messageId);
-    }
-
-    // Handle acknowledgement
-    else if (strcmp(type, "ack") == 0) {
-
-        uint32_t replyTo = packet["replyTo"] | 0UL;
-
-        Serial.printf(
-            "[ACK RECEIVED] From %u, message ID: %u\n",
-            from,
-            replyTo
-        );
-    }
-}
-
-// =====================================================
-// CONNECTION CALLBACKS
-// =====================================================
-
-void newConnectionCallback(uint32_t nodeId) {
-
-    Serial.printf(
-        "[CONNECTED] New node: %u\n",
-        nodeId
-    );
-
-    printNetworkStatus();
-}
-
-void changedConnectionCallback() {
-
-    Serial.println("[MESH] Topology changed");
-
-    printNetworkStatus();
-}
-
-// =====================================================
-// SEND MESSAGE TO SPECIFIC NODE
-// =====================================================
-
-void sendToNode(uint32_t destination, String payload) {
-
-    if (destination == 0) {
-        Serial.println("[ERROR] Invalid destination");
-        return;
-    }
-
-    if (!mesh.isConnected(destination)) {
-        Serial.printf(
-            "[WARNING] Node %u is not currently known as connected\n",
-            destination
-        );
-    }
-
-    String packet = createPacket(
-        "message",
-        destination,
-        payload
-    );
-
-    bool success = mesh.sendSingle(destination, packet);
-
-    Serial.printf(
-        "[UNICAST] To %u: %s\n",
-        destination,
-        success ? "queued" : "failed"
-    );
-
-    if (hostConnected) {
-        JsonDocument output;
-
-        output["event"] = "send";
-        output["to"] = destination;
-        output["queued"] = success;
-
-        sendSerialJson(output);
-    }
-}
-
-// =====================================================
-// USB COMMAND HANDLER
-// =====================================================
-
-void processSerialCommand(const char* line) {
-
-    JsonDocument command;
-
-    DeserializationError error = deserializeJson(command, line);
-
-    if (error) {
-        Serial.println("[USB] Invalid JSON command");
-        return;
-    }
-
-    const char* cmd = command["cmd"] | "";
-
-    // Python host handshake
-    if (strcmp(cmd, "hello") == 0) {
-
-        lastHostSeen = millis();
-
-        if (!hostConnected) {
-            hostConnected = true;
-
-            Serial.println("[USB] Python host connected");
-
-            sendSerialEvent("ready");
+            Serial.println("[GATEWAY LOST]");
         }
 
         return;
     }
 
-    // Refresh host connection
-    lastHostSeen = millis();
+    // Data intended for the Python server.
+    if (strcmp(type, "server_data") == 0 && hostConnected) {
 
-    // Request node list
-    if (strcmp(cmd, "nodes") == 0) {
+        JsonDocument output;
 
-        printNetworkStatus();
+        output["event"] = "server_data";
+        output["from"] = doc["from"] | from;
+        output["payload"] = doc["payload"] | "";
+
+        sendSerialJson(output);
+
+        Serial.printf("[SERVER FORWARD] From node %u\n", from);
+
         return;
     }
 
-    // Send a directed mesh message
-    if (strcmp(cmd, "send") == 0) {
-
-        uint32_t destination = command["to"] | 0UL;
-        String payload = command["payload"] | "";
-
-        sendToNode(destination, payload);
-        return;
-    }
-
-    Serial.println("[USB] Unknown command");
+    // Normal mesh message.
+    Serial.println();
+    Serial.println("[RECEIVED MESSAGE]");
+    Serial.printf("Sender: %u\n", from);
+    Serial.printf("Message: %s\n", msg.c_str());
+    Serial.println();
 }
 
-// =====================================================
-// READ USB SERIAL WITHOUT BLOCKING MESH
-// =====================================================
+// ==========================================
+// CONNECTION CALLBACKS
+// ==========================================
+
+void newConnectionCallback(uint32_t nodeId) {
+    Serial.printf("[NEW NODE CONNECTED] Node ID: %u\n", nodeId);
+    printNetworkStatus();
+}
+
+void changedConnectionCallback() {
+    Serial.println("[MESH TOPOLOGY CHANGED]");
+    printNetworkStatus();
+}
+
+void nodeTimeAdjustedCallback(int32_t offset) {
+    Serial.printf("[TIME SYNC] Offset: %ld us\n", (long)offset);
+}
+
+// ==========================================
+// USB INPUT
+// ==========================================
+
+void processSerialCommand(const char* line) {
+
+    JsonDocument doc;
+
+    if (deserializeJson(doc, line)) {
+        return;
+    }
+
+    const char* cmd = doc["cmd"] | "";
+
+    // Python sends only a keepalive.
+    if (strcmp(cmd, "hello") == 0) {
+        lastHostSeen = millis();
+
+        if (!hostConnected) {
+            hostConnected = true;
+            Serial.println("[USB] Python connected");
+        }
+    }
+}
 
 void processSerialInput() {
 
@@ -335,7 +271,6 @@ void processSerialInput() {
 
             serialBufferIndex = 0;
         }
-
         else if (c != '\r') {
 
             if (serialBufferIndex < sizeof(serialBuffer) - 1) {
@@ -343,38 +278,15 @@ void processSerialInput() {
             }
             else {
                 serialBufferIndex = 0;
-                Serial.println("[USB] Input buffer overflow");
+                Serial.println("[USB] Input overflow");
             }
         }
     }
 }
 
-// =====================================================
-// PERIODIC TELEMETRY
-// =====================================================
-
-void sendTelemetry() {
-
-    String payload = "Hello from node ";
-    payload += String(mesh.getNodeId());
-
-    String packet = createPacket(
-        "telemetry",
-        0,
-        payload
-    );
-
-    bool success = mesh.sendBroadcast(packet);
-
-    Serial.printf(
-        "[TELEMETRY] %s\n",
-        success ? "broadcast queued" : "failed"
-    );
-}
-
-// =====================================================
+// ==========================================
 // SETUP
-// =====================================================
+// ==========================================
 
 void setup() {
 
@@ -382,19 +294,21 @@ void setup() {
     delay(1000);
 
     Serial.println();
-    Serial.println("================================");
-    Serial.println("       ESP32 MESH SYSTEM");
-    Serial.println("================================");
+    Serial.println("=================================");
+    Serial.println("       ESP32 MESH NETWORK");
+    Serial.println("=================================");
 
     mesh.setDebugMsgTypes(
         ERROR |
         STARTUP |
-        CONNECTION
+        CONNECTION |
+        COMMUNICATION
     );
 
     mesh.onReceive(&receivedCallback);
     mesh.onNewConnection(&newConnectionCallback);
     mesh.onChangedConnections(&changedConnectionCallback);
+    mesh.onNodeTimeAdjusted(&nodeTimeAdjustedCallback);
 
     mesh.init(
         MESH_PREFIX,
@@ -405,42 +319,84 @@ void setup() {
         MESH_CHANNEL
     );
 
-    Serial.printf(
-        "[STARTED] Node ID: %u\n",
-        mesh.getNodeId()
-    );
-
-    Serial.println("[USB] Waiting for Python host");
+    Serial.printf("[MESH STARTED] Node ID: %u\n",
+                  mesh.getNodeId());
 }
 
-// =====================================================
+// ==========================================
 // MAIN LOOP
-// =====================================================
+// ==========================================
 
 void loop() {
 
-    // Maintain mesh
     mesh.update();
-
-    // Process USB commands
     processSerialInput();
 
     uint32_t now = millis();
 
-    // Detect disconnected Python host
-    if (
-        hostConnected &&
-        now - lastHostSeen > HOST_TIMEOUT
-    ) {
+    // Detect Python connection loss.
+    if (hostConnected &&
+        now - lastHostSeen > HOST_TIMEOUT) {
+
         hostConnected = false;
-        Serial.println("[USB] Python host disconnected");
+
+        Serial.println("[USB] Python disconnected");
     }
 
-    // Broadcast telemetry every 5 seconds
-    if (now - lastTelemetry >= TELEMETRY_INTERVAL) {
+    // Announce gateway state periodically.
+    if (hostConnected &&
+        now - lastGatewayAnnounce >= GATEWAY_ANNOUNCE_MS) {
 
-        lastTelemetry = now;
+        lastGatewayAnnounce = now;
+        announceGateway(true);
+    }
 
-        sendTelemetry();
+    // Announce gateway shutdown once.
+    if (previousHostState && !hostConnected) {
+        announceGateway(false);
+    }
+
+    previousHostState = hostConnected;
+
+    // Detect lost gateway announcements.
+    if (gatewayAvailable &&
+        now - lastGatewaySeen > GATEWAY_TIMEOUT) {
+
+        gatewayAvailable = false;
+        gatewayNodeId = 0;
+
+        Serial.println("[GATEWAY] Announcement timeout");
+    }
+
+    // Existing mesh broadcast.
+    if (now - lastBroadcast >= BROADCAST_INTERVAL) {
+
+        lastBroadcast = now;
+
+        String message = "Hello from node ";
+        message += String(mesh.getNodeId());
+
+        mesh.sendBroadcast(message);
+
+        Serial.printf("[MESH BROADCAST] %s\n",
+                      message.c_str());
+    }
+
+    // Example: periodic data sent to Python.
+    if (now - lastServerTelemetry >= SERVER_TELEMETRY_INTERVAL) {
+
+        lastServerTelemetry = now;
+
+        String payload = "Telemetry from node ";
+        payload += String(mesh.getNodeId());
+
+        sendToServer(payload);
+    }
+
+    // Existing network diagnostics.
+    if (now - lastStatus >= STATUS_INTERVAL) {
+
+        lastStatus = now;
+        printNetworkStatus();
     }
 }
