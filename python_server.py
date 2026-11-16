@@ -3,7 +3,7 @@ import serial
 import json
 import time
 
-PORT = "COM5"  
+PORT = "COM3"  
 BAUD = 115200
 
 def main():
