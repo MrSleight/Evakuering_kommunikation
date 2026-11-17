@@ -6,22 +6,17 @@
 #include "diagnostics/NetworkDiagnostics.h"
 #include "gateway/SerialManager.h"
 #include "gateway/GatewayManager.h"
-// ==========================================
-// MESH CONFIGURATION
-// ==========================================
+
 
 #include "Config.h"
 
-// ==========================================
-// GLOBAL OBJECTS
-// ==========================================
+//GLobals
 uint32_t lastBroadcast = 0;
 uint32_t lastStatus = 0;
 uint32_t lastServerTelemetry = 0;
 
-// ==========================================
-// MESSAGE CALLBACK
-// ==========================================
+// MESSAGE CALLBACK ==========================================
+
 
 void receivedCallback(uint32_t from, String &msg) {
 
@@ -50,9 +45,9 @@ void receivedCallback(uint32_t from, String &msg) {
     Serial.printf("Message: %s\n", msg.c_str());
     Serial.println();
 }
-// ==========================================
-// CONNECTION CALLBACKS
-// ==========================================
+
+// CONNECTION CALLBACKS==========================================
+
 
 void newConnectionCallback(uint32_t nodeId) {
     Serial.printf("[NEW NODE CONNECTED] Node ID: %u\n", nodeId);
@@ -74,9 +69,7 @@ void nodeTimeAdjustedCallback(int32_t offset) {
     Serial.printf("[TIME SYNC] Offset: %ld us\n", (long)offset);
 }
 
-// ==========================================
-// SETUP
-// ==========================================
+// SETUP==========================================
 
 void setup() {
     beginSerialManager();
@@ -106,9 +99,7 @@ void setup() {
                   mesh.getNodeId());
 }
 
-// ==========================================
-// MAIN LOOP
-// ==========================================
+// MAIN LOOP==========================================
 
 
 void loop() {
