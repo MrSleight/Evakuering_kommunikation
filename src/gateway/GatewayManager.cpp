@@ -65,15 +65,49 @@ bool sendToServer(const String &payload) {
     }
 
     if (!gatewayAvailable) {
-        Serial.println("[SERVER] No gateway available");
         return false;
     }
 
     bool success = mesh.sendSingle(gatewayNodeId, packet);
+    return success;
+}
 
-    Serial.printf("[SERVER] Routed to gateway %u: %s\n",
-                  gatewayNodeId,
-                  success ? "QUEUED" : "FAILED");
+bool sendToServerReliable(
+    const String &payload,
+    painlessmesh::ack::deliveryCallback_t callback
+) {
+    JsonDocument doc;
+
+    doc["type"] = "server_data";
+    doc["from"] = mesh.getNodeId();
+    doc["payload"] = payload;
+
+    String packet;
+    serializeJson(doc, packet);
+
+    // This node is the USB-connected gateway
+    if (isHostConnected()) {
+        sendGatewayData(payload);
+
+        // Confirms handoff to the local Serial output,
+        // not receipt by the Python application.
+        if (callback) {
+            callback(mesh.getNodeId(), true, 0);
+        }
+        return true;
+    }
+
+    // No gateway available
+    if (!gatewayAvailable) {
+        return false;
+    }
+
+    // Send with PainlessMesh delivery acknowledgement
+    bool success = mesh.sendSingle(
+        gatewayNodeId,
+        packet,
+        callback
+    );
 
     return success;
 }
