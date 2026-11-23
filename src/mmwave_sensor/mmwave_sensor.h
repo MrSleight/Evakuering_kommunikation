@@ -23,4 +23,6 @@ private:
     static const unsigned long SIGNAL_TIMEOUT_MS = 5000;
 };
 
+void runMmWaveSensor();
+
 #endif
