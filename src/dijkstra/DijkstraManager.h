@@ -1,8 +1,22 @@
+
 #pragma once
+
 #include <Arduino.h>
+#include <vector>
 
-int minDistance(const std::vector<int>& dist, const std::vector<bool>& routeChecked);
-void dijkstra(const std::vector<std::vector<int>>& graph, int from);
+struct RoutingResult {
+    bool valid;
+    uint32_t selectedExit;
+    int totalCost;
+};
 
-//int minDistance(int dist[], bool routeChecked[], int num_nodes);
-//void dijkstra(int graph[num_nodes][num_nodes], int from);
+RoutingResult dijkstra(
+    const std::vector<std::vector<int>>& graph,
+    const std::vector<uint32_t>& nodeIds,
+    const std::vector<bool>& blocked,
+    uint32_t from,
+    uint32_t exitRight,
+    uint32_t exitLeft
+);
+
+RoutingResult calculateRoute(uint32_t from);

@@ -10,6 +10,7 @@ static constexpr uint8_t MAX_BLOCKAGE_RECORDS = 30;
 static constexpr uint32_t BLOCKAGE_BROADCAST_INTERVAL = 10000;
 
 // Sensor state
+static bool blockageChanged = false;
 static bool sensorAValue = false;
 static bool sensorAInitialized = false;
 static bool sensorAPending = false;
@@ -24,7 +25,7 @@ static uint32_t sensorBRevision = 0;
 
 // Blockage state
 struct BlockageRecord {
-    int id;
+    uint32_t id;
     bool blocked;
     bool used;
 };
@@ -163,14 +164,20 @@ void updateSensorB(int value) {
 }
 
 // Update local blockage state
-void updateBlockage(int id, bool blocked) {
+void updateBlockage(uint32_t id, bool blocked) {
+    if (!blocked) {
+        return;
+    }
     for (uint8_t i = 0; i < MAX_BLOCKAGE_RECORDS; i++) {
         if (blockageBuffer[i].used &&
             blockageBuffer[i].id == id) {
 
+
+                
             if (blockageBuffer[i].blocked != blocked) {
                 blockageBuffer[i].blocked = blocked;
                 blockageDirty = true;
+                blockageChanged = true;
             }
 
             return;
@@ -183,6 +190,7 @@ void updateBlockage(int id, bool blocked) {
             blockageBuffer[i].blocked = blocked;
             blockageBuffer[i].used = true;
             blockageDirty = true;
+            blockageChanged = true;
             return;
         }
     }
@@ -190,26 +198,48 @@ void updateBlockage(int id, bool blocked) {
     Serial.printf("[ERROR] Blockage buffer full: %d\n", id);
 }
 
+bool isNodeBlocked(uint32_t nodeId) {
+    for (uint8_t i = 0; i < MAX_BLOCKAGE_RECORDS; i++) {
+        if (blockageBuffer[i].used &&
+            blockageBuffer[i].id == nodeId) {
+            return blockageBuffer[i].blocked;
+        }
+    }
+
+    // Unknown nodes are assumed to be unblocked.
+    return false;
+}
+
 // Apply received blockage state without rebroadcasting it
 void handleBlockageMessage(JsonDocument &doc) {
     JsonArrayConst records = doc["records"].as<JsonArrayConst>();
 
     for (JsonObjectConst record : records) {
-        if (!record["id"].is<int>() ||
+        if (!record["id"].is<uint32_t>() ||
             !record["blocked"].is<bool>()) {
             continue;
         }
 
-        int id = record["id"].as<int>();
+        uint32_t id = record["id"].as<uint32_t>();
         bool blocked = record["blocked"].as<bool>();
+
+        // Ignore unblocked records. Blockage is permanent during runtime.
+        if (!blocked) {
+            continue;
+        }
 
         bool found = false;
 
         for (uint8_t i = 0; i < MAX_BLOCKAGE_RECORDS; i++) {
             if (blockageBuffer[i].used &&
                 blockageBuffer[i].id == id) {
-                blockageBuffer[i].blocked = blocked;
                 found = true;
+
+                if (!blockageBuffer[i].blocked) {
+                    blockageBuffer[i].blocked = true;
+                    blockageChanged = true;
+                }
+
                 break;
             }
         }
@@ -218,11 +248,21 @@ void handleBlockageMessage(JsonDocument &doc) {
             for (uint8_t i = 0; i < MAX_BLOCKAGE_RECORDS; i++) {
                 if (!blockageBuffer[i].used) {
                     blockageBuffer[i].id = id;
-                    blockageBuffer[i].blocked = blocked;
+                    blockageBuffer[i].blocked = true;
                     blockageBuffer[i].used = true;
+                    blockageChanged = true;
                     break;
                 }
             }
         }
     }
+}
+
+bool consumeBlockageChanged() {
+    if (!blockageChanged) {
+        return false;
+    }
+
+    blockageChanged = false;
+    return true;
 }

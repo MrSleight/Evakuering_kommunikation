@@ -4,11 +4,16 @@
 #include <cstring>
 
 #include "mesh/MeshManager.h"
-#include "diagnostics/NetworkDiagnostics.h"
 #include "gateway/SerialManager.h"
 #include "gateway/GatewayManager.h"
 #include "messaging/MessageManager.h"
+#include "dijkstra/DijkstraManager.h"
 #include "Config.h"
+
+#define DEBOUNCE_MS 1000
+
+uint32_t lastPress = 0;
+bool blocked = false;
 
 // MESSAGE CALLBACK
 
@@ -24,7 +29,12 @@ void receivedCallback(uint32_t from, String &msg) {
 
     if (strcmp(type, "gateway_announce") == 0 ||
         strcmp(type, "server_data") == 0) {
+
         handleGatewayMessage(from, doc);
+    }
+    else if (strcmp(type, "BLOCKAGE_STATE") == 0) {
+        Serial.printf("[BLOCKAGE] Received from node %u\n", from);
+        handleBlockageMessage(doc);
     }
 }
 
@@ -37,15 +47,18 @@ void newConnectionCallback(uint32_t nodeId) {
 void changedConnectionCallback() {
     Serial.println("[MESH] Topology changed");
 }
-    //  callback time sync
 
 void nodeTimeAdjustedCallback(int32_t offset) {
+    (void)offset;
 }
 
 // SETUP
 
 void setup() {
     Serial.begin(115200);
+
+    // Original working active-HIGH button configuration
+    pinMode(GPIO_NUM_4, INPUT);
 
     updateSensorA(true);
     updateSensorB(42);
@@ -72,9 +85,45 @@ void setup() {
 
 void loop() {
     updateMesh();
+
     processSerialInput();
     updateSerialConnection();
 
     updateGatewayManager();
     updateMessageManager();
+
+    // ROUTE RECALCULATION
+
+    if (consumeBlockageChanged()) {
+        RoutingResult result = calculateRoute(mesh.getNodeId());
+
+        if (result.valid) {
+            Serial.printf("[ROUTING] Selected exit: %u\n",
+                          result.selectedExit);
+
+            Serial.printf("[ROUTING] Total cost: %d\n",
+                          result.totalCost);
+        }
+        else {
+            Serial.println("[ROUTING] No valid route");
+        }
+    }
+
+    // BUTTON HANDLING
+
+    uint32_t now = millis();
+
+    if (now - lastPress >= DEBOUNCE_MS) {
+        if (digitalRead(GPIO_NUM_4) == HIGH && !blocked) {
+
+            blocked = true;
+
+            Serial.printf("[BUTTON] Node %u is now BLOCKED\n",
+                          mesh.getNodeId());
+
+            updateBlockage(mesh.getNodeId(), true);
+
+            lastPress = now;
+        }
+    }
 }
