@@ -33,6 +33,29 @@ void MmWaveSensor::update() {
     }
 }
 
+void runMmWaveSensor() {
+    MmWaveSensor presenceSensor(Serial2);
+
+    Serial.begin(115200);
+    presenceSensor.begin();
+
+    Serial.println("mmWave-sensor startad...");
+
+    while (true) {
+        presenceSensor.update();
+
+        if (presenceSensor.hasValidSignal()) {
+            if (presenceSensor.isHumanPresent()) {
+                Serial.println("Narvaro detekterad! (ON)");
+            } else {
+                Serial.println("Ingen narvaro. (OFF)");
+            }
+        }
+
+        delay(200);
+    }
+}
+
 bool MmWaveSensor::isHumanPresent() const {
     return humanPresent;
 }
