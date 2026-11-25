@@ -3,6 +3,8 @@
 #include <ArduinoJson.h>
 #include <cstring>
 
+#include "Display/DisplayManager.h"
+#include "mmwave_sensor/mmwave_sensor.h"
 #include "mesh/MeshManager.h"
 #include "gateway/SerialManager.h"
 #include "gateway/GatewayManager.h"
@@ -14,6 +16,8 @@
 
 uint32_t lastPress = 0;
 bool blocked = false;
+
+MmWaveSensor waveSensor(Serial2);
 
 // MESSAGE CALLBACK
 
@@ -33,7 +37,6 @@ void receivedCallback(uint32_t from, String &msg) {
         handleGatewayMessage(from, doc);
     }
     else if (strcmp(type, "BLOCKAGE_STATE") == 0) {
-        Serial.printf("[BLOCKAGE] Received from node %u\n", from);
         handleBlockageMessage(doc);
     }
 }
@@ -57,11 +60,9 @@ void nodeTimeAdjustedCallback(int32_t offset) {
 void setup() {
     Serial.begin(115200);
 
-    // Original working active-HIGH button configuration
-    pinMode(GPIO_NUM_4, INPUT);
+    pinMode(GPIO_NUM_32, INPUT_PULLDOWN);
 
-    updateSensorA(true);
-    updateSensorB(42);
+
 
     beginMessageManager();
     beginSerialManager();
@@ -77,6 +78,9 @@ void setup() {
 
     beginMesh();
     beginGatewayManager();
+
+    waveSensor.begin();
+    displayInitialize();
 
     Serial.printf("[MESH READY] Node ID: %u\n", mesh.getNodeId());
 }
@@ -114,7 +118,7 @@ void loop() {
     uint32_t now = millis();
 
     if (now - lastPress >= DEBOUNCE_MS) {
-        if (digitalRead(GPIO_NUM_4) == HIGH && !blocked) {
+        if (digitalRead(GPIO_NUM_32) == HIGH && !blocked) {
 
             blocked = true;
 
@@ -125,5 +129,13 @@ void loop() {
 
             lastPress = now;
         }
+    }
+
+    // MM-WAVE SENSOR
+
+    waveSensor.update();
+
+    if (waveSensor.hasValidSignal()) {
+        updateSensorA(waveSensor.isHumanPresent());
     }
 }
