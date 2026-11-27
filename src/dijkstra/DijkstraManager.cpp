@@ -1,24 +1,25 @@
-
 #include <Arduino.h>
 #include <limits.h>
 #include <vector>
 
 #include "../messaging/MessageManager.h"
+#include "../Display/DisplayManager.h"
 #include "DijkstraManager.h"
 
 const std::vector<uint32_t> nodeIds = {
     4294836393,
     4294868513,
-    1231725625
+    4294827913
+    // 1231725625,
 };
 
 std::vector<std::vector<int>> dijkstraMap = {
     {0, 2, 1},
-    {2, 0, 3}, 
-    {1, 3, 0} 
+    {2, 0, 3},
+    {1, 3, 0}
 };
 
-uint32_t this_node = 1231725625;
+uint32_t this_node = 4294827913;
 uint32_t exitRight = 4294836393;
 uint32_t exitLeft  = 4294868513;
 
@@ -86,7 +87,7 @@ RoutingResult dijkstra(
 
     std::vector<int> dist(numNodes, INT_MAX);
     std::vector<bool> checked(numNodes, false);
-    
+
     dist[startIndex] = 0;
 
     for (int i = 0; i < numNodes; i++) {
@@ -148,17 +149,18 @@ RoutingResult calculateRoute(uint32_t from) {
     for (uint32_t id : nodeIds) {
         blockedNodes.push_back(isNodeBlocked(id));
     }
+
     Serial.println("[ROUTING] Blockage status:");
 
-for (size_t i = 0; i < nodeIds.size(); i++) {
-    Serial.printf(
-        "[ROUTING] Node %u: %s\n",
-        nodeIds[i],
-        blockedNodes[i] ? "BLOCKED" : "AVAILABLE"
-    );
-}
+    for (size_t i = 0; i < nodeIds.size(); i++) {
+        Serial.printf(
+            "[ROUTING] Node %u: %s\n",
+            nodeIds[i],
+            blockedNodes[i] ? "BLOCKED" : "AVAILABLE"
+        );
+    }
 
-    return dijkstra(
+    RoutingResult result = dijkstra(
         dijkstraMap,
         nodeIds,
         blockedNodes,
@@ -166,4 +168,17 @@ for (size_t i = 0; i < nodeIds.size(); i++) {
         exitRight,
         exitLeft
     );
+
+    // Update display direction when a valid route is found.
+    if (result.valid) {
+        const bool directionRight = (result.selectedExit == exitRight);
+        displaySetDirection(directionRight);
+
+        Serial.printf(
+            "[DISPLAY] Direction set to: %s\n",
+            directionRight ? "RIGHT" : "LEFT"
+        );
+    }
+
+    return result;
 }

@@ -2,7 +2,10 @@
 #include <Arduino.h>
 #include <ArduinoJson.h>
 #include <cstring>
+#include "people_counter/PeopleCounter.h"
 
+#include "Display/DisplayManager.h"
+#include "mmwave_sensor/mmwave_sensor.h"
 #include "mesh/MeshManager.h"
 #include "gateway/SerialManager.h"
 #include "gateway/GatewayManager.h"
@@ -15,53 +18,58 @@
 uint32_t lastPress = 0;
 bool blocked = false;
 
+MmWaveSensor waveSensor(Serial2);
+
 // MESSAGE CALLBACK
 
-void receivedCallback(uint32_t from, String &msg) {
+void receivedCallback(uint32_t from, String &msg)
+{
     JsonDocument doc;
 
-    if (deserializeJson(doc, msg)) {
+    if (deserializeJson(doc, msg))
+    {
         Serial.printf("[RECEIVE ERROR] Node: %u\n", from);
         return;
     }
 
-    const char* type = doc["type"] | "";
+    const char *type = doc["type"] | "";
 
     if (strcmp(type, "gateway_announce") == 0 ||
-        strcmp(type, "server_data") == 0) {
+        strcmp(type, "server_data") == 0)
+    {
 
         handleGatewayMessage(from, doc);
     }
-    else if (strcmp(type, "BLOCKAGE_STATE") == 0) {
-        Serial.printf("[BLOCKAGE] Received from node %u\n", from);
+    else if (strcmp(type, "BLOCKAGE_STATE") == 0)
+    {
         handleBlockageMessage(doc);
     }
 }
 
 // CONNECTION CALLBACKS
 
-void newConnectionCallback(uint32_t nodeId) {
+void newConnectionCallback(uint32_t nodeId)
+{
     Serial.printf("[NODE CONNECTED] %u\n", nodeId);
 }
 
-void changedConnectionCallback() {
+void changedConnectionCallback()
+{
     Serial.println("[MESH] Topology changed");
 }
 
-void nodeTimeAdjustedCallback(int32_t offset) {
+void nodeTimeAdjustedCallback(int32_t offset)
+{
     (void)offset;
 }
 
 // SETUP
 
-void setup() {
+void setup()
+{
     Serial.begin(115200);
 
-    // Original working active-HIGH button configuration
-    pinMode(GPIO_NUM_4, INPUT);
-
-    updateSensorA(true);
-    updateSensorB(42);
+    pinMode(GPIO_NUM_32, INPUT_PULLDOWN);
 
     beginMessageManager();
     beginSerialManager();
@@ -78,13 +86,20 @@ void setup() {
     beginMesh();
     beginGatewayManager();
 
+    waveSensor.begin();
+    displayInitialize();
+    initPeopleCounter();
+
     Serial.printf("[MESH READY] Node ID: %u\n", mesh.getNodeId());
 }
 
 // MAIN LOOP
 
-void loop() {
+void loop()
+{
     updateMesh();
+    updatePeopleCounter();
+    updateSensorB(getPeopleCount());
 
     processSerialInput();
     updateSerialConnection();
@@ -94,17 +109,20 @@ void loop() {
 
     // ROUTE RECALCULATION
 
-    if (consumeBlockageChanged()) {
+    if (consumeBlockageChanged())
+    {
         RoutingResult result = calculateRoute(mesh.getNodeId());
 
-        if (result.valid) {
+        if (result.valid)
+        {
             Serial.printf("[ROUTING] Selected exit: %u\n",
                           result.selectedExit);
 
             Serial.printf("[ROUTING] Total cost: %d\n",
                           result.totalCost);
         }
-        else {
+        else
+        {
             Serial.println("[ROUTING] No valid route");
         }
     }
@@ -113,8 +131,10 @@ void loop() {
 
     uint32_t now = millis();
 
-    if (now - lastPress >= DEBOUNCE_MS) {
-        if (digitalRead(GPIO_NUM_4) == HIGH && !blocked) {
+    if (now - lastPress >= DEBOUNCE_MS)
+    {
+        if (digitalRead(GPIO_NUM_32) == HIGH && !blocked)
+        {
 
             blocked = true;
 
@@ -125,5 +145,14 @@ void loop() {
 
             lastPress = now;
         }
+    }
+
+    // MM-WAVE SENSOR
+
+    waveSensor.update();
+
+    if (waveSensor.hasValidSignal())
+    {
+        updateSensorA(waveSensor.isHumanPresent());
     }
 }
